@@ -10,6 +10,8 @@ use App\Notifications\NouvelleInscriptionNotification;
 use App\Notifications\EvenementModifieNotification;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\DB;
+use App\Models\EventWaitlist;
 
 class EventController extends Controller
 {
@@ -39,7 +41,9 @@ class EventController extends Controller
      */
     public function index(Request $request)
     {
-        $query = Event::with('club')->whereIn('statut', ['Validé', 'Accepté']);
+        $query = Event::with('club')
+            ->withCount(['participants', 'listeAttente as waitlist_count'])
+            ->whereIn('statut', ['Validé', 'Accepté']);
 
         // Filtres optionnels
         if ($request->has('categorie') && $request->categorie !== 'Tous') {
@@ -52,12 +56,7 @@ class EventController extends Controller
 
         $events = $query->latest()->get();
 
-        // Utilisation de formatEvent pour chaque événement
-        $formattedEvents = $events->map(function ($event) {
-            return $this->formatEvent($event, false);
-        });
-
-        return response()->json($formattedEvents);
+        return response()->json($this->formatEventList($events));
     }
 
     /**
@@ -125,12 +124,12 @@ class EventController extends Controller
         $user = auth('api')->user();
 
         $events = Event::with('club')
+            ->withCount(['participants', 'listeAttente as waitlist_count'])
             ->whereHas('club', fn($q) => $q->where('createur_id', $user->id))
             ->latest()
-            ->get()
-            ->map(fn($event) => $this->formatEvent($event, false));
+            ->get();
 
-        return response()->json($events);
+        return response()->json($this->formatEventList($events));
     }
 
     /**
@@ -250,19 +249,58 @@ class EventController extends Controller
     /**
      * Formate l'événement pour la réponse JSON
      */
-    private function formatEvent(Event $event, bool $detailed = false): array
+    /**
+     * Formate une liste d'événements avec un nombre constant de requêtes
+     * (compteurs via withCount + inscriptions/liste d'attente de l'utilisateur préchargées).
+     */
+    private function formatEventList($events): array
+    {
+        $user = Auth::user() ?? auth('api')->user();
+        $userId = $user?->id;
+        $ids = $events->pluck('id');
+
+        $registered = collect();
+        $waitlisted = collect();
+        if ($userId && $ids->isNotEmpty()) {
+            $registered = DB::table('event_user')
+                ->where('user_id', $userId)
+                ->whereIn('event_id', $ids)
+                ->pluck('calendar_added', 'event_id');
+            $waitlisted = EventWaitlist::where('user_id', $userId)
+                ->where('statut', 'en_attente')
+                ->whereIn('event_id', $ids)
+                ->pluck('position', 'event_id');
+        }
+
+        return $events->map(fn($event) => $this->formatEvent($event, false, [
+            'registered' => $registered,
+            'waitlisted' => $waitlisted,
+        ]))->values()->all();
+    }
+
+    private function formatEvent(Event $event, bool $detailed = false, ?array $prefetched = null): array
     {
         $user = Auth::user() ?? auth('api')->user();
         $userId = $user?->id;
 
-        $isRegistered  = $userId ? $event->estInscrit($userId) : false;
-        $isWaitlisted  = $userId ? $event->estEnListeAttente($userId) : false;
-        $waitlistPos   = $isWaitlisted ? $event->rangListeAttente($userId) : null;
-        $calendarAdded = false;
-        if ($isRegistered && $userId) {
-            $pivot = $event->participants()->where('user_id', $userId)->first()?->pivot;
-            $calendarAdded = (bool) ($pivot?->calendar_added ?? false);
+        if ($prefetched !== null) {
+            $isRegistered  = $prefetched['registered']->has($event->id);
+            $isWaitlisted  = $prefetched['waitlisted']->has($event->id);
+            $waitlistPos   = $isWaitlisted ? $prefetched['waitlisted']->get($event->id) : null;
+            $calendarAdded = $isRegistered && (bool) $prefetched['registered']->get($event->id);
+        } else {
+            $isRegistered  = $userId ? $event->estInscrit($userId) : false;
+            $isWaitlisted  = $userId ? $event->estEnListeAttente($userId) : false;
+            $waitlistPos   = $isWaitlisted ? $event->rangListeAttente($userId) : null;
+            $calendarAdded = false;
+            if ($isRegistered && $userId) {
+                $pivot = $event->participants()->where('user_id', $userId)->first()?->pivot;
+                $calendarAdded = (bool) ($pivot?->calendar_added ?? false);
+            }
         }
+
+        $inscrits = $event->inscrits;
+        $waitlistTotal = $event->waitlist_count ?? $event->listeAttente()->count();
 
         $data = [
             'id'                  => $event->id,
@@ -276,8 +314,8 @@ class EventController extends Controller
             'categorie'           => $event->categorie,
             'places_disponibles'  => $event->places_disponibles,
             'capacite_max'        => $event->capacite_max,
-            'inscrits'            => $event->inscrits ?? $event->participants()->count(),
-            'est_complet'         => ($event->capacite_max && $event->participants()->count() >= $event->capacite_max) ? true : false,
+            'inscrits'            => $inscrits,
+            'est_complet'         => ($event->capacite_max && $inscrits >= $event->capacite_max) ? true : false,
             'statut'              => $event->statut,
             'club_id'             => $event->club_id,
             'club_name'           => $event->club?->nom,
@@ -287,7 +325,7 @@ class EventController extends Controller
             'waitlist_position'   => $waitlistPos,
             'calendar_added'      => $calendarAdded,
             // NOUVEAU — Branche 3 : Total de la liste d'attente
-            'waitlist_total'      => $event->listeAttente()->count(),
+            'waitlist_total'      => $waitlistTotal,
         ];
 
         if ($detailed) {

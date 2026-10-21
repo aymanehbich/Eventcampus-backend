@@ -50,18 +50,16 @@ class ClubController extends Controller
      */
     public function index(Request $request)
     {
-        $query = Club::withCount('membres')->where('statut', 'validé');
+        $userId = $request->user()->id;
+        $query = Club::withCount('membres')
+            ->withExists(['membres as is_member' => fn($q) => $q->where('users.id', $userId)])
+            ->where('statut', 'validé');
 
         if ($request->has('categorie') && $request->categorie !== 'Tous') {
             $query->where('categorie', $request->categorie);
         }
 
         $clubs = $query->latest()->get();
-
-        $userId = $request->user()->id;
-        $clubs->each(function ($club) use ($userId) {
-            $club->is_member = $club->membres->contains($userId);
-        });
 
         return response()->json($clubs);
     }

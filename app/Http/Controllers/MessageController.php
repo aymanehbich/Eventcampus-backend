@@ -194,12 +194,23 @@ class MessageController extends Controller
         ->where('user_id', '!=', $user->id)
         ->first()?->id;
 
+    // Optional attachment
+    $attachmentPath = null;
+    $attachmentName = null;
+    if ($request->hasFile('file')) {
+        $file = $request->file('file');
+        $attachmentName = $file->getClientOriginalName();
+        $attachmentPath = $file->store('message_attachments', 'public');
+    }
+
     // Create message
     $message = Message::create([
         'conversation_id' => $conversation->id,
         'user_id' => $user->id,
         'receiver_id' => $receiverId,
-        'content' => $request->validated()['content'],
+        'content' => $request->validated()['content'] ?? '',
+        'attachment_path' => $attachmentPath,
+        'attachment_name' => $attachmentName,
         'is_read' => false,
     ]);
 

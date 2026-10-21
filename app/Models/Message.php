@@ -16,11 +16,20 @@ class Message extends Model
         'conversation_id',
         'is_read',
         'receiver_id',
+        'attachment_path',
+        'attachment_name',
     ];
 
     protected $casts = [
         'is_read' => 'boolean',
     ];
+
+    protected $appends = ['attachment_url'];
+
+    public function getAttachmentUrlAttribute(): ?string
+    {
+        return $this->attachment_path ? asset('storage/' . $this->attachment_path) : null;
+    }
 
     public function club()
     {

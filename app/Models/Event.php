@@ -63,7 +63,8 @@ class Event extends Model
 
     public function getInscritsAttribute(): int
     {
-        return $this->participants()->count();
+        // Réutilise le withCount('participants') quand il est présent (évite une requête par événement)
+        return $this->attributes['participants_count'] ?? $this->participants()->count();
     }
 
     public function getEstCompletAttribute(): bool
